@@ -113,8 +113,8 @@ fi
 # wait for remaining workers and coordinator to exit.
 wait
 
-#########################################################
-# now indexer
+########################################################
+now indexer
 rm -f mr-*
 
 # generate the correct output
@@ -246,7 +246,7 @@ sleep 1
 # `jobs` ensures that any completed old processes from other tests
 # are not waited upon.
 jobs &> /dev/null
-if [[ "$OSTYPE" = "darwin"* ]]
+if [[ "$OSTYPE" = "darwin"* || "$OSTYPE" = "linux-gnu"* ]]
 then
   # bash on the Mac doesn't have wait -n
   while [ ! -e $DF ]
@@ -280,7 +280,7 @@ else
 fi
 rm -f mr-*
 
-#########################################################
+# # #########################################################
 echo '***' Starting crash test.
 
 # generate the correct output
