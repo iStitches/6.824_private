@@ -10,26 +10,55 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+	"time"
+
+	"6.5840/mr"
+	"6.5840/mylog"
+)
+
+// func main() {
+// 	if len(os.Args) != 2 {
+// 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
+// 		os.Exit(1)
+// 	}
+// 	mapf, reducef := loadPlugin1(os.Args[1])
+// 	workerNum, err := strconv.Atoi(os.Args[2])
+// 	if err != nil {
+// 		panic("Worker start failed, need ")
+// 	}
+// 	var wg sync.WaitGroup
+// 	wg.Add(workerNum)
+
+// 	for i := 0; i < workerNum; i++ {
+// 		go mr.Worker(mapf, reducef, i, &wg)
+// 	}
+// 	wg.Wait()
+// }
 
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
 		os.Exit(1)
 	}
-
-	mapf, reducef := loadPlugin(os.Args[1])
-
-	mr.Worker(mapf, reducef)
+	mapf, reducef := loadPlugin1(os.Args[1])
+	logName := "./worker_" + time.Now().Format("2006-01-02 15:04:05") + ".log"
+	file, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		panic("log open failed")
+	}
+	mr.LOG = mylog.New(file, mylog.DebugLevel)
+	// mr.LOG = mylog.Default()
+	mr.Worker(mapf, reducef, 1)
 }
 
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so
-func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
+func loadPlugin1(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot load plugin %v", filename)
