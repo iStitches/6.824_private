@@ -23,15 +23,18 @@ const (
 	ErrInvalidParam
 	// invalid job State
 	ErrInvalidJobState
+	// invalid peer State
+	ErrInvalidPeerState
 )
 
 var errsMap = map[ErrorCode]string{
-	ErrUnsupportedType: "unsupported type",
-	ErrRepeatedJob:     "repeated job",
-	ErrStackOverflow:   "exceed depth limit",
-	ErrNotFound:        "not found",
-	ErrInvalidParam:    "invalid parameter",
-	ErrInvalidJobState: "invalid job state",
+	ErrUnsupportedType:  "unsupported type",
+	ErrRepeatedJob:      "repeated job",
+	ErrStackOverflow:    "exceed depth limit",
+	ErrNotFound:         "not found",
+	ErrInvalidParam:     "invalid parameter",
+	ErrInvalidJobState:  "invalid job state",
+	ErrInvalidPeerState: "invalid peer state",
 }
 
 func NewErrorCode(behavior ErrorCode, category Category) ErrorCode {
