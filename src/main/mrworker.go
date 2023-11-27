@@ -15,7 +15,6 @@ import (
 	"log"
 	"os"
 	"plugin"
-	"time"
 
 	"6.5840/mr"
 	"6.5840/mylog"
@@ -46,12 +45,13 @@ func main() {
 		os.Exit(1)
 	}
 	mapf, reducef := loadPlugin1(os.Args[1])
-	logName := "./worker_" + time.Now().Format("2006-01-02 15:04:05") + ".log"
-	file, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		panic("log open failed")
-	}
-	mr.LOG = mylog.New(file, mylog.DebugLevel)
+	// logName := "./worker_" + time.Now().Format("2006-01-02 15:04:05") + ".log"
+	// file, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE, 0644)
+	// if err != nil {
+	// 	panic("log open failed")
+	// }
+	mylog.InitLog()
+	mr.LOG = mylog.GetLogger()
 	// mr.LOG = mylog.Default()
 	mr.Worker(mapf, reducef, 1)
 }

@@ -49,18 +49,22 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
+	"6.5840/labgob"
+)
+
+// 请求/响应 结构体
 type reqMsg struct {
-	endname  interface{} // name of sending ClientEnd
+	endname  interface{} // name of sending ClientEnd，节点名
 	svcMeth  string      // e.g. "Raft.AppendEntries"
 	argsType reflect.Type
 	args     []byte
@@ -78,6 +82,7 @@ type ClientEnd struct {
 	done    chan struct{} // closed when Network is cleaned up
 }
 
+// 发送RPC，通过gob编解码
 // send an RPC, wait for the reply.
 // the return value indicates success; false means that
 // no reply was received from the server.
@@ -122,15 +127,16 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	}
 }
 
+// 网络连接信息
 type Network struct {
 	mu             sync.Mutex
 	reliable       bool
 	longDelays     bool                        // pause a long time on send on disabled connection
 	longReordering bool                        // sometimes delay replies a long time
-	ends           map[interface{}]*ClientEnd  // ends, by name
-	enabled        map[interface{}]bool        // by end name
-	servers        map[interface{}]*Server     // servers, by name
-	connections    map[interface{}]interface{} // endname -> servername
+	ends           map[interface{}]*ClientEnd  // ends, by name												节点名——ClientEnd
+	enabled        map[interface{}]bool        // by end name												节点名——available(true/false)
+	servers        map[interface{}]*Server     // servers, by name											节点名——Server
+	connections    map[interface{}]interface{} // endname -> servername										节点名——ServerName
 	endCh          chan reqMsg
 	done           chan struct{} // closed when Network is cleaned up
 	count          int32         // total RPC count, for statistics
@@ -147,7 +153,7 @@ func MakeNetwork() *Network {
 	rn.endCh = make(chan reqMsg)
 	rn.done = make(chan struct{})
 
-	// single goroutine to handle all ClientEnd.Call()s
+	// single goroutine to handle all ClientEnd.Call()  单协程处理节点的所有 RPC 请求
 	go func() {
 		for {
 			select {
@@ -215,6 +221,7 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 	return false
 }
 
+// 处理发送 RPC
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
 
@@ -400,6 +407,7 @@ func (rs *Server) AddService(svc *Service) {
 	rs.services[svc.name] = svc
 }
 
+// 发送 RPC 请求并回收响应
 func (rs *Server) dispatch(req reqMsg) replyMsg {
 	rs.mu.Lock()
 
@@ -473,6 +481,7 @@ func MakeService(rcvr interface{}) *Service {
 	return svc
 }
 
+// 调用具体 Service
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// prepare space into which to read the argument.

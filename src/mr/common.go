@@ -1,6 +1,8 @@
 package mr
 
-import "6.5840/mylog"
+import (
+	"go.uber.org/zap"
+)
 
 const (
 	RPC_DISTRIBUTE_JOB = "Coordinator.DistributeJob"
@@ -43,4 +45,4 @@ const (
 	WORKER_NUMS     = 3
 )
 
-var LOG *mylog.Logger
+var LOG *zap.Logger

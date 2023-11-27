@@ -23,12 +23,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
-	logName := "./coordinator_" + time.Now().Format("2006-01-02 15:04:05") + ".log"
-	file, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		panic("open log file failed")
-	}
-	mr.LOG = mylog.New(file, mylog.DebugLevel)
+	// logName := "./coordinator_" + time.Now().Format("2006-01-02 15:04:05") + ".log"
+	// file, err := os.OpenFile(logName, os.O_RDWR|os.O_CREATE, 0644)
+	// if err != nil {
+	// 	panic("open log file failed")
+	// }
+	mylog.InitLog()
+	mr.LOG = mylog.GetLogger()
 	// mr.LOG = mylog.Default()
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
