@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -27,6 +29,7 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.begin("Test (2A): initial election")
 
 	// is a leader elected?
+	fmt.Println("================Is a leader Elected?=================")
 	cfg.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
@@ -40,6 +43,7 @@ func TestInitialElection2A(t *testing.T) {
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
+	fmt.Println("================Stay the same without network failure?=================")
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
@@ -60,31 +64,40 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("================kill old leader %d=================\n", leader1)
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
+	fmt.Printf("================Old leader reconnect %d=================\n", leader1)
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no new leader should
 	// be elected.
+	fmt.Printf("================kill second leader %d=================\n", leader2)
 	cfg.disconnect(leader2)
+	fmt.Printf("================kill the last leader %d=================\n", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 
 	// check that the one connected server
 	// does not think it is the leader.
+	fmt.Println("================check no leader=================")
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
+	fmt.Printf("================begin reconnect one leader %d=================\n", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
+	fmt.Println("================reconnect one leader=================")
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
+	fmt.Printf("================reconnect another leader %d=================\n", leader2)
 	cfg.connect(leader2)
+	fmt.Println("================check reconnect one leader=================")
 	cfg.checkOneLeader()
 
 	cfg.end()
