@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,6 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -59,19 +59,29 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	stateMachine *RaftStateMachine
+	// election timer
+	electionTimer *Timer
+	// send heartBeat/appendEntries timer
+	sendHETimer *Timer
+	// print flag
+	printFlag bool
+}
 
+func (rf *Raft) PeerCount() int {
+	return len(rf.peers)
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+	var isLeader bool
+	rf.stateMachine.rwmu.RLock()
+	term = int(rf.stateMachine.currentTerm)
+	isLeader = rf.stateMachine.CurState == startSendHEState
+	rf.stateMachine.rwmu.RUnlock()
+	return term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -91,7 +101,6 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -113,7 +122,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,22 +131,98 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
+//
+// RequestVote RPC arguments structure
+//
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	Term         Term
+	CandidateId  int
+	LastLogIndex Index
+	LastLogTerm  Term
 }
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
+	Term        Term
+	VoteGranted bool
 }
 
-// example RequestVote RPC handler.
+//
+// AppendEntries RPC arguments structure
+//
+type AppendEntriesArgs struct {
+	Term         Term
+	LeaderId     int
+	PrevLogIndex Index // index of log entry immediately preceeding new ones
+	PrevLogTerm  Term
+	Entries      []Entry
+	LeaderCommit Index
+}
+
+type AppendEntriesReply struct {
+	Term    Term
+	Success bool
+}
+
+func (rf *Raft) sendAppendEntires(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.electionTimer.setElectionWait()
+	rf.electionTimer.Start()
+	reply.Success = false
+
+	rf.stateMachine.rwmu.RLock()
+	defer rf.stateMachine.rwmu.RUnlock()
+	reply.Term = rf.stateMachine.currentTerm
+
+	// current Term > args.Term, reject heartBeat
+	if rf.stateMachine.currentTerm > args.Term {
+		rf.print("current Term %d bigger than leader %d Term %d", rf.stateMachine.currentTerm, args.LeaderId, args.Term)
+		return
+	} else {
+		rf.print("encounter larger term %d, transfer to follower", args.Term)
+		rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: args.Term})
+		reply.Success = true
+	}
+	reply.Success = true
+	return
+}
+
+//
+// RequestVoteRPC handler
+// 1. compare requestTerm and currentTerm;
+// 2. compare voteFor judge whether to vote;
+// 3. fill reply;
+//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	reply.Term = rf.stateMachine.currentTerm
+	reply.VoteGranted = false
+	voteBool := false
+	rf.stateMachine.rwmu.RLock()
+	defer rf.stateMachine.rwmu.RUnlock()
+	// compare term
+	if rf.stateMachine.currentTerm < args.Term {
+		rf.print("requestVote from %d, request Term %d", args.CandidateId, args.Term)
+		rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: args.Term})
+		voteBool = true
+	} else if rf.stateMachine.currentTerm > args.Term {
+		rf.print("reject vote becauseof lowerTerm: args %d me %d", args.Term, rf.stateMachine.currentTerm)
+		voteBool = false
+	} else if rf.stateMachine.voteFor == VoteForNil || rf.stateMachine.voteFor == args.CandidateId {
+		// compare voteFor
+		voteBool = true
+	} else {
+		voteBool = false
+	}
+	// produce result
+	if !voteBool {
+		rf.print("vote result: reject vote for %d", args.CandidateId)
+	}
+	if voteBool {
+		reply.VoteGranted = true
+	}
+	return
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -173,7 +257,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -192,7 +275,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -222,12 +304,22 @@ func (rf *Raft) ticker() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 
-
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
+}
+
+//
+// print raft states：   states | command
+//
+func (rf *Raft) print(format string, vars ...interface{}) {
+	if !rf.printFlag {
+		return
+	}
+	output := fmt.Sprintf(format, vars...)
+	fmt.Printf("%d %s term %d voteFor %d | %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, output)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -245,15 +337,37 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.printFlag = true
 
-	// Your initialization code here (2A, 2B, 2C).
+	// one groutine to change randSeed automatically
+	go func() {
+		for {
+			rand.Seed(time.Now().UnixNano())
+			randMs := 100 + rand.Int()%200
+			time.Sleep(time.Duration(randMs) * time.Millisecond)
+		}
+	}()
+
+	// init RaftStateMachine
+	rf.init()
+	rf.electionTimer = MakeTimer(BaseRaftElectionTimeOut, rf.makeElectionTimeout(), rf)
+	rf.sendHETimer = MakeTimer(RaftHLTimeOut, rf.makeSendHLTimeout(), rf)
+
+	// repeat election timeout by another goroutine
+	go func() {
+		randMs := rand.Int() % 500
+		time.Sleep(time.Duration(randMs) * time.Millisecond)
+
+		rf.stateMachine.rwmu.RLock()
+		rf.stateMachine.raft.print("start election timer")
+		rf.stateMachine.rwmu.RUnlock()
+		rf.electionTimer.setElectionWait()
+		rf.electionTimer.Start()
+		go rf.stateMachine.execute()
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-	// start ticker goroutine to start elections
-	go rf.ticker()
-
 
 	return rf
 }
