@@ -25,15 +25,16 @@ type RaftStateMachine struct {
 	currentTerm Term
 	voteFor     int
 
-	// log replication
-	applyCh     chan ApplyMsg
-	log         []Entry
-	commitIndex Index // highest index of log entry to be committed
-	lastApplied Index // highest index of log entry applied to stateMachine
+	// log replication for per peer
+	applyCh     *chan ApplyMsg
+	log         []Entry // pay attention index 0 is null
+	commitIndex Index   // highest index of log entry need to be committed
+	lastApplied Index   // highest index of log entry applied to stateMachine
 
 	// volatile state on leaders
-	nextIndex  []Index // index of the next log entry to send to that server
-	matchIndex []Index // index of highest log entry known to be replicated on server
+	// leader ——> follower
+	nextIndex  []Index // index of the next log entry to send to that server，if follower's log is inconsistent with the leader's, reject appendEntriesRPC
+	matchIndex []Index // index of highest log entry known to be replicated on server, use for log replication
 
 	stateMachineMap map[SMState]string
 }
@@ -71,7 +72,7 @@ func (exeutor *RaftStateMachineExecutor) executeTransfer(source SMState, trans S
 	return newState
 }
 
-func (rf *Raft) init() {
+func (rf *Raft) init(applyCh *chan ApplyMsg) {
 	rf.stateMachine = &RaftStateMachine{
 		StateMachine: StateMachine{
 			CurState:  followerState,
@@ -82,6 +83,12 @@ func (rf *Raft) init() {
 		currentTerm:     TermNil,
 		voteFor:         VoteForNil,
 		stateMachineMap: make(map[SMState]string),
+		applyCh:         applyCh,
+		log:             make([]Entry, 1),
+		commitIndex:     0,
+		lastApplied:     0,
+		nextIndex:       make([]Index, rf.PeerCount()),
+		matchIndex:      make([]Index, rf.PeerCount()),
 	}
 	rf.stateMachine.registerStates()
 }
