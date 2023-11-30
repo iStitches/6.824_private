@@ -151,15 +151,17 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
 	Term         Term
 	LeaderId     int
-	PrevLogIndex Index // index of log entry immediately preceeding new ones
+	PrevLogIndex Index // use for log consistency checking
 	PrevLogTerm  Term
 	Entries      []Entry
 	LeaderCommit Index
 }
 
 type AppendEntriesReply struct {
-	Term    Term
-	Success bool
+	Term             Term
+	Success          bool
+	ConflictLogIndex Index // when follower lastLogIndex inconsistent with leader, response follower's lastLogIndex
+	ConflictLogTerm  Term  // when follower lastLogIndex consistency with leader, but term inconsistent, response follower's lastLogTerm
 }
 
 func (rf *Raft) sendAppendEntires(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -167,6 +169,11 @@ func (rf *Raft) sendAppendEntires(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+//
+// AppendEntriesRPC handler
+// 1. cope with heartBeat: reject argsTerm < currentTerm;
+// 2. cope with logReplication： compare current logIndex&logTerm with PrevLogIndex&PrevLogTerm
+//
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.electionTimer.setElectionWait()
 	rf.electionTimer.Start()
@@ -176,7 +183,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.stateMachine.rwmu.RUnlock()
 	reply.Term = rf.stateMachine.currentTerm
 
-	// current Term > args.Term, reject heartBeat
+	rf.print("receive logEntry from %d prevLogIndex %d prevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
+
+	// heartBeat：current Term > args.Term, reject
 	if rf.stateMachine.currentTerm > args.Term {
 		rf.print("current Term %d bigger than leader %d Term %d", rf.stateMachine.currentTerm, args.LeaderId, args.Term)
 		return
@@ -185,6 +194,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: args.Term})
 		reply.Success = true
 	}
+
+	// logCheck：
+	// 1. lastLogIndex < PrevLogIndex, find consistent EntryIndex and resend AppendEntriesRPC
+	// 2. lastLogIndex == PrevLogIndex, if term is inconsistent, reply inconsistent term and resend AppendEntriesRPC
+	// 3. lastLogIndex > PrevLogIndex, check the logEntry in position of PrevLogIndex
+	if rf.stateMachine.lastLogIndex() < args.PrevLogIndex {
+		rf.print("logIndex smaller than leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
+		reply.ConflictLogIndex = rf.stateMachine.lastLogIndex()
+		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(rf.stateMachine.lastLogIndex()))
+		return
+	}
+	// exclude same LogIndex but different LogTerm, find previous logIndex that term isn't equal to prevLogTerm
+	if rf.stateMachine.getTermByIndex(int(args.PrevLogIndex)) != args.PrevLogTerm {
+		rf.print("logTerm inconsistent with leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
+		reply.ConflictLogIndex = rf.stateMachine.searchPreviousTermIndex(args.PrevLogIndex)
+		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(args.PrevLogIndex))
+		return
+	}
+	// follower start replicate logEntry from leader
+	rf.stateMachine.issueTrans(rf.makeNewAppendLogEntry(int(args.PrevLogIndex), &args.Entries, int(args.LeaderCommit)))
 	reply.Success = true
 	return
 }
@@ -269,13 +298,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+//
+// when start, append logEntry into leader peer
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
 
 	// Your code here (2B).
-
+	rf.stateMachine.rwmu.Lock()
+	defer rf.stateMachine.rwmu.Unlock()
+	rf.print("receive command %v", command)
+	isLeader = rf.stateMachine.CurState == startSendHEState
+	index = int(rf.stateMachine.lastLogIndex()) + 1
+	term = int(rf.stateMachine.currentTerm)
+	if isLeader {
+		rf.stateMachine.appendLogEntry(Entry{
+			Command: command,
+			Term:    rf.stateMachine.currentTerm,
+		})
+	}
 	return index, term, isLeader
 }
 
@@ -298,19 +340,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
-	for rf.killed() == false {
-
-		// Your code here (2A)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-	}
-}
-
 //
 // print raft states：   states | command
 //
@@ -319,7 +348,7 @@ func (rf *Raft) print(format string, vars ...interface{}) {
 		return
 	}
 	output := fmt.Sprintf(format, vars...)
-	fmt.Printf("%d %s term %d voteFor %d | %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, output)
+	fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitLogIndex %d | %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, output)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -349,10 +378,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	// init RaftStateMachine
-	rf.init()
+	rf.init(&applyCh)
 	rf.electionTimer = MakeTimer(BaseRaftElectionTimeOut, rf.makeElectionTimeout(), rf)
 	rf.sendHETimer = MakeTimer(RaftHLTimeOut, rf.makeSendHLTimeout(), rf)
-
 	// repeat election timeout by another goroutine
 	go func() {
 		randMs := rand.Int() % 500
