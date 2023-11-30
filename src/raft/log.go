@@ -1,33 +1,50 @@
 package raft
 
-import "6.5840/meta"
-
 //
-// 处理过程中缓存的日志数据
-//
-
-//
-// 日志节点
+// save logEntry
 //
 type Entry struct {
 	Term    Term
 	Command interface{}
 }
 
-//
-// 日志结构体
-//
-type Log struct {
-	Entries       []Entry
-	FirstLogIndex int
-	LastLogIndex  int
+func (sm *RaftStateMachine) getTermByIndex(index int) Term {
+	if index >= sm.logLen() || index <= 0 {
+		return TermNil
+	}
+	return sm.log[index].Term
 }
 
-func (l *Log) getLastLogTerm() (Term, error) {
-	if l.LastLogIndex >= 0 && l.LastLogIndex >= l.FirstLogIndex && len(l.Entries) > 0 {
-		return l.Entries[l.LastLogIndex].Term, nil
-	} else {
-		return TermNil, nil
+func (sm *RaftStateMachine) logLen() int {
+	return len(sm.log)
+}
+
+func (sm *RaftStateMachine) lastLogIndex() Index {
+	return Index(sm.logLen() - 1)
+}
+
+func (sm *RaftStateMachine) lastLogTerm() Term {
+	return sm.getTermByIndex(int(sm.lastLogIndex()))
+}
+
+func (sm *RaftStateMachine) appendLogEntry(entries ...Entry) {
+	sm.log = append(sm.log, entries...)
+}
+
+// remove log in the position of index and after this
+func (sm *RaftStateMachine) removeAfter(index int) {
+	if index < sm.logLen() {
+		sm.log = sm.log[:index]
 	}
-	return -1, wrapError(meta.ErrInvalidParam, "invalid logIndex", nil)
+}
+
+// search previous logTerm's index
+func (sm *RaftStateMachine) searchPreviousTermIndex(index Index) Index {
+	curTerm := sm.getTermByIndex(int(index))
+	for i := int(index); i > 0; i-- {
+		if sm.getTermByIndex(i) != curTerm {
+			return Index(i)
+		}
+	}
+	return 0
 }

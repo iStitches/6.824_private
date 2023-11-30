@@ -11,7 +11,7 @@ import "sync"
 //
 type StateMachine struct {
 	CurState  SMState
-	transChan chan SMTransfer
+	transChan chan SMTransfer // use channel to ensure concurrency safety, using blocked channel to make sure only one state one time
 	rwmu      *sync.RWMutex
 }
 
@@ -57,7 +57,8 @@ func (sm *StateMachine) execute() {
 }
 
 //
-// issue SMTransfer for StateMachine
+// issue SMTransfer for StateMachine by another goroutine
+// if under concurrency, multiple goroutine may issueTrans int the same time, these goroutines need to complete, so use another goroutine
 //
 func (sm *StateMachine) issueTrans(trans SMTransfer) {
 	go func() {

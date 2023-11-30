@@ -43,7 +43,7 @@ func (trans *ElectionTimeOut) transfer(source SMState) SMState {
 	trans.machine.raft.print("waitMs: %d", trans.machine.raft.electionTimer.waitMS)
 	trans.machine.raft.electionTimer.Start()
 
-	// send requestVoteRPC to other server by parallel
+	// send requestVoteRPC to other server by parallel, use another goroutine to escape from blocking main electTimeOut goroutine
 	go trans.machine.raft.doElect()
 	return startElectionState
 }
@@ -57,7 +57,7 @@ func (trans *ElectionTimeOut) getName() string {
 }
 
 //
-// send requestVote request to per Peer
+// send requestVote request to each peers by parallel
 //
 func (rf *Raft) sendRequestVotePerOne(votes *int, join *int, elected *bool, server int, cond *sync.Cond) {
 	rf.stateMachine.rwmu.RLock()
@@ -122,6 +122,7 @@ func (rf *Raft) doElect() {
 	cond := sync.NewCond(&sync.Mutex{})
 	for idx, _ := range rf.peers {
 		if idx != rf.me {
+			// send requestVoteRpc by another goroutine
 			go rf.sendRequestVotePerOne(&voteCount, &joinCount, &elected, idx, cond)
 		}
 	}
