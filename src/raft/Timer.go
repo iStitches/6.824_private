@@ -14,22 +14,22 @@ type Timer struct {
 }
 
 func MakeTimer(waitMS int, command SMTransfer, raft *Raft) *Timer {
-	t := &Timer{
+	timer := &Timer{
 		waitMS:  waitMS,
 		command: command,
 		raft:    raft,
 	}
-	t.timer1 = time.NewTimer(10000 * time.Second)
+	timer.timer1 = time.NewTimer(10000 * time.Second)
 	// use Closures to stop timer, and wait for using
-	go func() {
-		t.Stop()
+	go func(timer *Timer) {
+		timer.Stop()
 		for {
-			<-t.timer1.C
-			t.raft.stateMachine.issueTrans(command)
-			t.Start()
+			<-timer.timer1.C
+			timer.raft.stateMachine.issueTrans(timer.command)
+			timer.Start()
 		}
-	}()
-	return t
+	}(timer)
+	return timer
 }
 
 //
@@ -49,8 +49,8 @@ func (t *Timer) Stop() {
 
 func (t *Timer) SetWaitMS(waitMS int) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.waitMS = waitMS
-	t.mu.Unlock()
 }
 
 //
