@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,7 +66,8 @@ type Raft struct {
 	// send heartBeat/appendEntries timer
 	sendHETimer *Timer
 	// print flag
-	printFlag bool
+	printFlag     bool
+	raftPersister *RaftPersister
 }
 
 func (rf *Raft) PeerCount() int {
@@ -93,13 +95,8 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	output := rf.raftPersister.persist(rf.stateMachine)
+	rf.persister.Save(output, nil)
 }
 
 // restore previously persisted state.
@@ -107,19 +104,10 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	dataDump := rf.persister.ReadRaftState()
+	rf.raftPersister.deserializeState(dataDump, 0, rf.stateMachine)
+	rf.raftPersister.deserializeLog(dataDump, stateBinaryOffset, rf.stateMachine)
+	rf.print("readPersist %d, currentTerm %d, voteFor %d", rf.me, rf.stateMachine.currentTerm, rf.stateMachine.voteFor)
 }
 
 // the service says it has created a snapshot that has
@@ -183,16 +171,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.stateMachine.rwmu.RUnlock()
 	reply.Term = rf.stateMachine.currentTerm
 
-	rf.print("receive logEntry from %d prevLogIndex %d prevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
+	rf.print("receive logEntry from %d prevLogIndex %d prevLogTerm %d term %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term)
 
-	// heartBeat：current Term > args.Term, reject
-	if rf.stateMachine.currentTerm > args.Term {
-		rf.print("current Term %d bigger than leader %d Term %d", rf.stateMachine.currentTerm, args.LeaderId, args.Term)
-		return
-	} else {
+	// for heartBeat, compare argsTerm and currentTerm, pay attention to change peerState at first
+	if rf.stateMachine.currentTerm <= args.Term {
 		rf.print("encounter larger term %d, transfer to follower", args.Term)
-		rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: args.Term})
+		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.LeaderId))
 		reply.Success = true
+	}
+	if rf.stateMachine.currentTerm > args.Term {
+		rf.print("reply false because leader term %d small than currentTerm %d", args.Term, rf.stateMachine.currentTerm)
+		return
 	}
 
 	// logCheck：
@@ -203,6 +192,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.print("logIndex smaller than leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.ConflictLogIndex = rf.stateMachine.lastLogIndex()
 		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(rf.stateMachine.lastLogIndex()))
+		reply.Success = false
 		return
 	}
 	// exclude same LogIndex but different LogTerm, find previous logIndex that term isn't equal to prevLogTerm
@@ -210,9 +200,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.print("logTerm inconsistent with leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.ConflictLogIndex = rf.stateMachine.searchPreviousTermIndex(args.PrevLogIndex)
 		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(args.PrevLogIndex))
+		reply.Success = false
 		return
 	}
 	// follower start replicate logEntry from leader
+	rf.print("follower %d appendLogEntry, ArgsLogLength %d", rf.me, len(args.Entries))
 	rf.stateMachine.issueTrans(rf.makeNewAppendLogEntry(int(args.PrevLogIndex), &args.Entries, int(args.LeaderCommit)))
 	reply.Success = true
 	return
@@ -225,31 +217,41 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // 3. fill reply;
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	reply.Term = rf.stateMachine.currentTerm
-	reply.VoteGranted = false
-	voteBool := false
 	rf.stateMachine.rwmu.RLock()
 	defer rf.stateMachine.rwmu.RUnlock()
-	// compare term
+
+	reply.VoteGranted = false
+	reply.Term = rf.stateMachine.currentTerm
+	stateBool := false
+
+	// compare peer's term
+	rf.print("%d receive requestVoteRPC from %d, request Term %d", rf.me, args.CandidateId, args.Term)
+	// 1. requestTerm > currentTerm, change to followerState
 	if rf.stateMachine.currentTerm < args.Term {
-		rf.print("requestVote from %d, request Term %d", args.CandidateId, args.Term)
-		rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: args.Term})
-		voteBool = true
+		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.CandidateId))
+		stateBool = true
 	} else if rf.stateMachine.currentTerm > args.Term {
 		rf.print("reject vote becauseof lowerTerm: args %d me %d", args.Term, rf.stateMachine.currentTerm)
-		voteBool = false
+		stateBool = false
 	} else if rf.stateMachine.voteFor == VoteForNil || rf.stateMachine.voteFor == args.CandidateId {
 		// compare voteFor
-		voteBool = true
+		stateBool = true
 	} else {
-		voteBool = false
+		stateBool = false
 	}
-	// produce result
-	if !voteBool {
-		rf.print("vote result: reject vote for %d", args.CandidateId)
+	// compare logTerm and logIndex
+	isRequestLogUptoDate := rf.stateMachine.isUptoDate(int(args.LastLogIndex), int(args.LastLogTerm))
+	// return result
+	if !stateBool {
+		rf.print("vote result: reject vote for %d because lower-term", args.CandidateId)
 	}
-	if voteBool {
+	if !isRequestLogUptoDate {
+		rf.print("vote result: reject vote for %d because no-upToDate log", args.CandidateId)
+	}
+	// compare stateTerm and logTerm&logIndex, finally decide to vote, change peerStatus
+	if stateBool && isRequestLogUptoDate {
 		reply.VoteGranted = true
+		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.CandidateId))
 	}
 	return
 }
@@ -308,11 +310,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.stateMachine.rwmu.Lock()
 	defer rf.stateMachine.rwmu.Unlock()
-	rf.print("receive command %v", command)
 	isLeader = rf.stateMachine.CurState == startSendHEState
 	index = int(rf.stateMachine.lastLogIndex()) + 1
 	term = int(rf.stateMachine.currentTerm)
 	if isLeader {
+		rf.print("receive command %v", command)
 		rf.stateMachine.appendLogEntry(Entry{
 			Command: command,
 			Term:    rf.stateMachine.currentTerm,
@@ -348,7 +350,12 @@ func (rf *Raft) print(format string, vars ...interface{}) {
 		return
 	}
 	output := fmt.Sprintf(format, vars...)
-	fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitLogIndex %d | %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, output)
+	var builder strings.Builder
+	for i := 0; i <= int(rf.stateMachine.lastApplied); i++ {
+		entry := rf.stateMachine.log[i]
+		builder.WriteString(fmt.Sprintf("<%d,%d,%v>, ", i, entry.Term, entry.Command))
+	}
+	fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitLogIndex %d %v| %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, builder.String(), output)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -368,34 +375,38 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.printFlag = true
 
-	// one groutine to change randSeed automatically
+	// one groutine to change randSeed automatically, sleep duration randomlly
 	go func() {
-		for {
+		for !rf.killed() {
 			rand.Seed(time.Now().UnixNano())
-			randMs := 100 + rand.Int()%200
+			randMs := 800 + rand.Int()%1000
 			time.Sleep(time.Duration(randMs) * time.Millisecond)
 		}
 	}()
 
-	// init RaftStateMachine
+	// init RaftStateMachine、RaftPersister
 	rf.init(&applyCh)
+	rf.raftPersister = rf.makeRaftPersister()
+	// init electionTimer、sendHETimer but not start
 	rf.electionTimer = MakeTimer(BaseRaftElectionTimeOut, rf.makeElectionTimeout(), rf)
 	rf.sendHETimer = MakeTimer(RaftHLTimeOut, rf.makeSendHLTimeout(), rf)
-	// repeat election timeout by another goroutine
-	go func() {
-		randMs := rand.Int() % 500
-		time.Sleep(time.Duration(randMs) * time.Millisecond)
-
-		rf.stateMachine.rwmu.RLock()
-		rf.stateMachine.raft.print("start election timer")
-		rf.stateMachine.rwmu.RUnlock()
-		rf.electionTimer.setElectionWait()
-		rf.electionTimer.Start()
-		go rf.stateMachine.execute()
-	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	// repeat election timeout by another goroutine
+	go func() {
+		if !rf.killed() {
+			randMs := rand.Int() % 500
+			time.Sleep(time.Duration(randMs) * time.Millisecond)
+
+			rf.stateMachine.rwmu.RLock()
+			rf.stateMachine.raft.print("start election timer")
+			rf.stateMachine.rwmu.RUnlock()
+			rf.electionTimer.setElectionWait()
+			rf.electionTimer.Start()
+			go rf.stateMachine.execute()
+		}
+	}()
 	return rf
 }
