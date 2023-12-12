@@ -12,7 +12,7 @@ import "sync"
 type StateMachine struct {
 	CurState  SMState
 	transChan chan SMTransfer // use channel to ensure concurrency safety, using blocked channel to make sure only one state one time
-	rwmu      *sync.RWMutex
+	rwmu      sync.RWMutex
 }
 
 const noTransferState = 900 // stateMachine end
