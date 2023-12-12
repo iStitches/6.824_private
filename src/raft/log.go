@@ -48,3 +48,13 @@ func (sm *RaftStateMachine) searchPreviousTermIndex(index Index) Index {
 	}
 	return 0
 }
+
+// compare logIndex and logTerm to conclude whether log is uptodate
+func (sm *RaftStateMachine) isUptoDate(lastLogIndex int, lastLogTerm int) bool {
+	// log with bigger term is more-update
+	if sm.lastLogTerm() != Term(lastLogTerm) {
+		return sm.lastLogTerm() <= Term(lastLogTerm)
+	}
+	// log with same-term, which index is bigger and is more-update
+	return sm.lastLogIndex() <= Index(lastLogIndex)
+}
