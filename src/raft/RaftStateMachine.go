@@ -2,7 +2,6 @@ package raft
 
 import (
 	"log"
-	"sync"
 )
 
 //
@@ -28,7 +27,7 @@ type RaftStateMachine struct {
 	// log replication for per peer
 	applyCh     *chan ApplyMsg
 	log         []Entry // pay attention index 0 is null
-	commitIndex Index   // highest index of log entry need to be committed
+	commitIndex Index   // highest index of log entry known to be committed
 	lastApplied Index   // highest index of log entry applied to stateMachine
 
 	// volatile state on leaders
@@ -72,12 +71,12 @@ func (exeutor *RaftStateMachineExecutor) executeTransfer(source SMState, trans S
 	return newState
 }
 
+// init RaftStateMachine
 func (rf *Raft) init(applyCh *chan ApplyMsg) {
 	rf.stateMachine = &RaftStateMachine{
 		StateMachine: StateMachine{
 			CurState:  followerState,
 			transChan: make(chan SMTransfer),
-			rwmu:      new(sync.RWMutex),
 		},
 		raft:            rf,
 		currentTerm:     TermNil,

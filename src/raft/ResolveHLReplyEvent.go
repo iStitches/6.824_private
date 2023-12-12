@@ -27,6 +27,7 @@ func (trans *ResolveHLReply) transfer(source SMState) SMState {
 		trans.doFailure()
 	}
 	trans.machine.raft.print("nextIndex %v", trans.machine.nextIndex)
+	trans.machine.raft.persist()
 	return noTransferState
 }
 
@@ -52,7 +53,7 @@ func (trans *ResolveHLReply) doSuccess() {
 func (trans *ResolveHLReply) doFailure() {
 	// fast search match nextIndex
 	if trans.reply.ConflictLogIndex < trans.machine.nextIndex[trans.server] {
-		trans.machine.nextIndex[trans.server] = trans.reply.ConflictLogIndex
+		trans.machine.nextIndex[trans.server] = trans.reply.ConflictLogIndex + 1
 	}
 	trans.machine.raft.print("logEntry reject by %d, try again on nextIndex %d next cycle", trans.server, trans.machine.nextIndex[trans.server])
 }
@@ -66,7 +67,7 @@ func (sm *RaftStateMachine) tryCommit() {
 	if newCommitIndex > sm.lastLogIndex() {
 		return
 	}
-	sm.raft.print("leader tryCommit log, oldCommitIndex %d", oldCommitIndex)
+	//sm.raft.print("leader tryCommit log, oldCommitIndex %d", oldCommitIndex)
 	for {
 		agree := 0
 		// compare each peerNode matchIndex with leader commitIndex
@@ -74,13 +75,15 @@ func (sm *RaftStateMachine) tryCommit() {
 			if idx == sm.raft.me {
 				continue
 			}
+			// ensure leader can only submit logEntry of currentTerm
+			// but for logEntries of previousTerm, leader can only copyEntries
 			if sm.matchIndex[idx] >= newCommitIndex && sm.getTermByIndex(int(newCommitIndex)) == sm.currentTerm {
 				agree++
 			}
 		}
 		if agree+1 > sm.raft.PeerCount()/2 {
 			sm.commitIndex = newCommitIndex
-			sm.raft.print("over half counts peer replicate logEntry success, start apply into stateMachine")
+			//sm.raft.print("over half counts peer replicate logEntry success, start apply into stateMachine")
 		}
 		newCommitIndex++
 		if newCommitIndex > sm.lastLogIndex() {
