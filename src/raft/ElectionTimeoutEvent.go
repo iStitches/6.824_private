@@ -38,13 +38,17 @@ func (trans *ElectionTimeOut) transfer(source SMState) SMState {
 	trans.machine.currentTerm++
 	trans.machine.voteFor = trans.machine.raft.me
 
+	if trans.machine.raft.killed() {
+		return noTransferState
+	}
 	// reset electionTimer and restart
 	trans.machine.raft.electionTimer.setElectionWait()
-	trans.machine.raft.print("waitMs: %d", trans.machine.raft.electionTimer.waitMS)
+	//trans.machine.raft.print("waitMs: %d", trans.machine.raft.electionTimer.waitMS)
 	trans.machine.raft.electionTimer.Start()
 
 	// send requestVoteRPC to other server by parallel, use another goroutine to escape from blocking main electTimeOut goroutine
 	go trans.machine.raft.doElect()
+	trans.machine.raft.persist()
 	return startElectionState
 }
 
@@ -63,24 +67,28 @@ func (rf *Raft) sendRequestVotePerOne(votes *int, join *int, elected *bool, serv
 	rf.stateMachine.rwmu.RLock()
 	// build dataStructure
 	req := RequestVoteArgs{
-		Term:        rf.stateMachine.currentTerm,
-		CandidateId: rf.me,
+		Term:         rf.stateMachine.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.stateMachine.lastLogIndex(),
+		LastLogTerm:  rf.stateMachine.lastLogTerm(),
 	}
 	reply := RequestVoteReply{}
 	rf.stateMachine.raft.print("send requestVote to %d", server)
 	rf.stateMachine.rwmu.RUnlock()
 
-	cond.L.Lock()
-	if *elected {
-		return
-	}
-	cond.L.Unlock()
-	// process requestVoteReply
+	// Error！: if elected, skip send requestVoteRPC, must send rpc despite of leader electing
+	// cond.L.Lock()
+	// if !*elected {
+	// 	rpcSend = true
+	// }
+	// cond.L.Unlock()
+
 	ok := rf.sendRequestVote(server, &req, &reply)
+	rf.stateMachine.rwmu.RLock()
 	if ok {
 		// transfer from candidate to follower if currentTerm is lower
 		if reply.Term > rf.stateMachine.currentTerm {
-			rf.stateMachine.issueTrans(&LargerTerm{machine: rf.stateMachine, newTerm: reply.Term})
+			rf.stateMachine.issueTrans(rf.makeLargerTermEvent(reply.Term, server))
 		} else {
 			rf.print("voteReply: %d replyto %d ok, grant %t", server, rf.me, reply.VoteGranted)
 			if reply.VoteGranted {
@@ -93,8 +101,8 @@ func (rf *Raft) sendRequestVotePerOne(votes *int, join *int, elected *bool, serv
 			if *votes+1 > rf.PeerCount()/2 {
 				if !*elected {
 					rf.print("become leader: %d", rf.me)
+					rf.stateMachine.issueTrans(rf.makeMajorElected())
 					*elected = true
-					rf.stateMachine.issueTrans(&SendHLTimeout{machine: rf.stateMachine})
 				}
 			}
 			cond.L.Unlock()
@@ -102,6 +110,8 @@ func (rf *Raft) sendRequestVotePerOne(votes *int, join *int, elected *bool, serv
 	} else {
 		rf.stateMachine.raft.print("unreachable requestVote to %d", server)
 	}
+	rf.stateMachine.rwmu.RUnlock()
+
 	cond.L.Lock()
 	*join++
 	if *join+1 >= len(rf.peers) {
@@ -120,11 +130,12 @@ func (rf *Raft) doElect() {
 	elected := false
 	// use cond to ensure sending len(rf.peers) counts requestVoteRequest
 	cond := sync.NewCond(&sync.Mutex{})
-	for idx, _ := range rf.peers {
-		if idx != rf.me {
-			// send requestVoteRpc by another goroutine
-			go rf.sendRequestVotePerOne(&voteCount, &joinCount, &elected, idx, cond)
+	for i := 0; i < rf.PeerCount(); i++ {
+		if i == rf.me {
+			continue
 		}
+		// send requestVoteRpc by another goroutine
+		go rf.sendRequestVotePerOne(&voteCount, &joinCount, &elected, i, cond)
 	}
 	// before wait, we need lock first
 	cond.L.Lock()
