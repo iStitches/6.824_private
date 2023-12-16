@@ -23,7 +23,7 @@ func (rf *Raft) makeNewAppendLogEntry(prevLogIndex int, entries *[]Entry, leader
 func (trans *NewAppendLogEntry) transfer(source SMState) SMState {
 	trans.machine.raft.print("appending %d entries", len(*trans.entries))
 	// if prevLogIndex match, but log has different term, remove all log entries in nextIndex and all after that
-	trans.machine.removeAfter(int(trans.prevLogIndex) + 1)
+	trans.machine.removeAfter(trans.prevLogIndex + 1)
 	// copy log entries
 	trans.machine.appendLogEntry(*trans.entries...)
 	trans.machine.raft.print("follower appendLogEntry length %d success", len(*trans.entries))
@@ -48,8 +48,9 @@ func (sm *RaftStateMachine) tryApplyLog() {
 	applyLen := sm.commitIndex - sm.lastApplied
 	if applyLen > 0 {
 		sm.raft.print("Apply LogEntry to stateMachine, commitIndex %d applyLen %d", sm.commitIndex, applyLen)
+		// deep copy and use another goroutine to applyLog into stateMachine
 		logBak := make([]Entry, applyLen)
-		copy(logBak, sm.log[sm.lastApplied+1:sm.commitIndex+1])
+		copy(logBak, sm.log[sm.getPhysicalIndex(sm.lastApplied+1):sm.getPhysicalIndex(sm.commitIndex+1)])
 		begin := sm.lastApplied + 1
 		// use another goroutine to append logEntries
 		go sm.applyEntries(&logBak, int(begin), int(sm.commitIndex))
@@ -68,7 +69,7 @@ func (sm *RaftStateMachine) applyEntries(entries *[]Entry, startIndex int, commi
 		}
 	}
 	sm.rwmu.Lock()
-	sm.lastApplied = sm.commitIndex
-	sm.raft.print("stateMachine content: %v", sm.log)
+	sm.lastApplied = max(sm.lastApplied, Index(commitIndex))
+	sm.raft.print("end logEntry apply to stateMachine")
 	sm.rwmu.Unlock()
 }

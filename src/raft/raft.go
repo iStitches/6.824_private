@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 	"fmt"
 	"math/rand"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,7 +95,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	output := rf.raftPersister.persist(rf.stateMachine)
-	rf.persister.Save(output, nil)
+	rf.persister.SaveRaftState(output)
+}
+
+func (rf *Raft) persistStateAndSnapshot(snapshot []byte) {
+	// state and logEntries data
+	stateOutput := rf.raftPersister.persist(rf.stateMachine)
+	rf.persister.Save(stateOutput, snapshot)
 }
 
 // restore previously persisted state.
@@ -115,8 +120,13 @@ func (rf *Raft) readPersist(data []byte) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
+	rf.stateMachine.rwmu.Lock()
+	defer rf.stateMachine.rwmu.Unlock()
+	rf.print("start make snapshot, index %d", index)
+	if index <= int(rf.stateMachine.lastSnapshotIndex) {
+		return
+	}
+	rf.saveStateAndSnapshot(Index(index), rf.stateMachine.currentTerm, snapshot)
 }
 
 //
@@ -148,13 +158,90 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term             Term
 	Success          bool
-	ConflictLogIndex Index // when follower lastLogIndex inconsistent with leader, response follower's lastLogIndex
-	ConflictLogTerm  Term  // when follower lastLogIndex consistency with leader, but term inconsistent, response follower's lastLogTerm
+	ConflictLogIndex Index   // when follower lastLogIndex inconsistent with leader, response follower's lastLogIndex
+	ConflictLogTerm  Term    // when follower lastLogIndex consistency with leader, but term inconsistent, response follower's lastLogTerm
+	Entries          []Entry // the first LogIndex of LogEntry
+}
+
+type InstallSnapshotRequest struct {
+	Term              Term // leader's Term
+	LeaderId          int
+	LastIncludedIndex Index // 快照所在的最后日志节点的索引
+	LastIncludedTerm  Term
+	// Offset            int // 文件块在快照中的偏移量
+	Data []byte
+	// done bool
+}
+
+type InstallSnapshotReply struct {
+	Term Term
+}
+
+func (rf *Raft) sendSnapShots(server int, args *InstallSnapshotRequest, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 func (rf *Raft) sendAppendEntires(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
+}
+
+// example code to send a RequestVote RPC to a server.
+// server is the index of the target server in rf.peers[].
+// expects RPC arguments in args.
+// fills in *reply with RPC reply, so caller should
+// pass &reply.
+// the types of the args and reply passed to Call() must be
+// the same as the types of the arguments declared in the
+// handler function (including whether they are pointers).
+//
+// The labrpc package simulates a lossy network, in which servers
+// may be unreachable, and in which requests and replies may be lost.
+// Call() sends a request and waits for a reply. If a reply arrives
+// within a timeout interval, Call() returns true; otherwise
+// Call() returns false. Thus Call() may not return for a while.
+// A false return can be caused by a dead server, a live server that
+// can't be reached, a lost request, or a lost reply.
+//
+// Call() is guaranteed to return (perhaps after a delay) *except* if the
+// handler function on the server side does not return.  Thus there
+// is no need to implement your own timeouts around Call().
+//
+// look at the comments in ../labrpc/labrpc.go for more details.
+//
+// if you're having trouble getting RPC to work, check that you've
+// capitalized all field names in structs passed over RPC, and
+// that the caller passes the address of the reply struct with &, not
+// the struct itself.
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+//
+// InstallSnapshotRPC handler
+//
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnapshotReply) {
+	rf.stateMachine.rwmu.Lock()
+	reply.Term = rf.stateMachine.currentTerm
+	if reply.Term > args.Term {
+		return
+	}
+	// update peer state if its term is smaller than arg.Term
+	if args.Term > rf.stateMachine.currentTerm {
+		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.LeaderId))
+	}
+	rf.print("receive installSnapshotRequest from %d at index %d", args.LeaderId, args.LastIncludedIndex)
+	if args.LastIncludedIndex <= rf.stateMachine.lastSnapshotIndex {
+		rf.stateMachine.rwmu.Unlock()
+		return
+	}
+	// try to install snapshot from leader, and update commitIndex、lastAppliedIndex
+	rf.saveStateAndSnapshot(args.LastIncludedIndex, args.Term, args.Data)
+	rf.stateMachine.rwmu.Unlock()
+	// apply snapshot to applyChan
+	rf.notifyServiceIs(args)
 }
 
 //
@@ -191,15 +278,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.stateMachine.lastLogIndex() < args.PrevLogIndex {
 		rf.print("logIndex smaller than leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.ConflictLogIndex = rf.stateMachine.lastLogIndex()
-		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(rf.stateMachine.lastLogIndex()))
+		reply.ConflictLogTerm = rf.stateMachine.getEntry(rf.stateMachine.lastLogIndex()).Term
 		reply.Success = false
 		return
 	}
 	// exclude same LogIndex but different LogTerm, find previous logIndex that term isn't equal to prevLogTerm
-	if rf.stateMachine.getTermByIndex(int(args.PrevLogIndex)) != args.PrevLogTerm {
+	if rf.stateMachine.getEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		rf.print("logTerm inconsistent with leader %d PrevLogIndex %d PrevLogTerm %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 		reply.ConflictLogIndex = rf.stateMachine.searchPreviousTermIndex(args.PrevLogIndex)
-		reply.ConflictLogTerm = rf.stateMachine.getTermByIndex(int(args.PrevLogIndex))
+		reply.ConflictLogTerm = rf.stateMachine.getEntry(reply.ConflictLogIndex).Term
 		reply.Success = false
 		return
 	}
@@ -223,6 +310,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	reply.Term = rf.stateMachine.currentTerm
 	stateBool := false
+	hasChange := false
 
 	// compare peer's term
 	rf.print("%d receive requestVoteRPC from %d, request Term %d", rf.me, args.CandidateId, args.Term)
@@ -230,6 +318,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.stateMachine.currentTerm < args.Term {
 		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.CandidateId))
 		stateBool = true
+		hasChange = true
 	} else if rf.stateMachine.currentTerm > args.Term {
 		rf.print("reject vote becauseof lowerTerm: args %d me %d", args.Term, rf.stateMachine.currentTerm)
 		stateBool = false
@@ -251,41 +340,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// compare stateTerm and logTerm&logIndex, finally decide to vote, change peerStatus
 	if stateBool && isRequestLogUptoDate {
 		reply.VoteGranted = true
-		rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.CandidateId))
+		if !hasChange {
+			rf.stateMachine.issueTrans(rf.makeLargerTermEvent(args.Term, args.CandidateId))
+		}
 	}
 	return
-}
-
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -350,12 +409,13 @@ func (rf *Raft) print(format string, vars ...interface{}) {
 		return
 	}
 	output := fmt.Sprintf(format, vars...)
-	var builder strings.Builder
-	for i := 0; i <= int(rf.stateMachine.lastApplied); i++ {
-		entry := rf.stateMachine.log[i]
-		builder.WriteString(fmt.Sprintf("<%d,%d,%v>, ", i, entry.Term, entry.Command))
-	}
-	fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitLogIndex %d %v| %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, builder.String(), output)
+	// var builder strings.Builder
+	// for i := rf.stateMachine.lastSnapshotIndex; i <= rf.stateMachine.commitIndex; i++ {
+	// 	entry := rf.stateMachine.log[rf.stateMachine.getPhysicalIndex(i)]
+	// 	builder.WriteString(fmt.Sprintf("<%d,%d,%v>, ", i, entry.Term, entry.Command))
+	// }
+	// fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitIndex %d %v| %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, builder.String(), output)
+	fmt.Printf("%d %s term %d voteFor %d lastLogIndex %d lastApplied %d commitIndex %d lastSnapShotIndex %d entries %d | %s\n", rf.me, rf.stateMachine.stateMachineMap[rf.stateMachine.CurState], rf.stateMachine.currentTerm, rf.stateMachine.voteFor, rf.stateMachine.lastLogIndex(), rf.stateMachine.lastApplied, rf.stateMachine.commitIndex, rf.stateMachine.lastSnapshotIndex, rf.stateMachine.logLen(), output)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -373,7 +433,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.printFlag = true
+	rf.printFlag = false
 
 	// one groutine to change randSeed automatically, sleep duration randomlly
 	go func() {

@@ -26,6 +26,10 @@ func (t *Timer) setElectionWait() {
 // transfer from follower to candidate
 //
 func (trans *ElectionTimeOut) transfer(source SMState) SMState {
+	if trans.machine.raft.killed() {
+		trans.machine.raft.electionTimer.Stop()
+		return noTransferState
+	}
 	// initialState must be followerState or startElectionState
 	if source != followerState && source != startElectionState {
 		trans.machine.raft.print("not transfer from follower or startElection")
@@ -37,10 +41,6 @@ func (trans *ElectionTimeOut) transfer(source SMState) SMState {
 	// change raft state data
 	trans.machine.currentTerm++
 	trans.machine.voteFor = trans.machine.raft.me
-
-	if trans.machine.raft.killed() {
-		return noTransferState
-	}
 	// reset electionTimer and restart
 	trans.machine.raft.electionTimer.setElectionWait()
 	//trans.machine.raft.print("waitMs: %d", trans.machine.raft.electionTimer.waitMS)
@@ -70,7 +70,7 @@ func (rf *Raft) sendRequestVotePerOne(votes *int, join *int, elected *bool, serv
 		Term:         rf.stateMachine.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: rf.stateMachine.lastLogIndex(),
-		LastLogTerm:  rf.stateMachine.lastLogTerm(),
+		LastLogTerm:  rf.stateMachine.getEntry(rf.stateMachine.lastLogIndex()).Term,
 	}
 	reply := RequestVoteReply{}
 	rf.stateMachine.raft.print("send requestVote to %d", server)

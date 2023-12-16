@@ -35,6 +35,8 @@ type RaftStateMachine struct {
 	nextIndex  []Index // index of the next log entry to send to that server，if follower's log is inconsistent with the leader's, reject appendEntriesRPC
 	matchIndex []Index // index of highest log entry known to be replicated on server, use for log replication
 
+	lastSnapshotIndex Index // the last index of snapshot
+
 	stateMachineMap map[SMState]string
 }
 
@@ -78,16 +80,17 @@ func (rf *Raft) init(applyCh *chan ApplyMsg) {
 			CurState:  followerState,
 			transChan: make(chan SMTransfer),
 		},
-		raft:            rf,
-		currentTerm:     TermNil,
-		voteFor:         VoteForNil,
-		stateMachineMap: make(map[SMState]string),
-		applyCh:         applyCh,
-		log:             make([]Entry, 1),
-		commitIndex:     0,
-		lastApplied:     0,
-		nextIndex:       make([]Index, rf.PeerCount()),
-		matchIndex:      make([]Index, rf.PeerCount()),
+		raft:              rf,
+		currentTerm:       TermNil,
+		voteFor:           VoteForNil,
+		stateMachineMap:   make(map[SMState]string),
+		applyCh:           applyCh,
+		log:               make([]Entry, 1),
+		commitIndex:       0,
+		lastApplied:       0,
+		nextIndex:         make([]Index, rf.PeerCount()),
+		matchIndex:        make([]Index, rf.PeerCount()),
+		lastSnapshotIndex: 0,
 	}
 	rf.stateMachine.registerStates()
 }

@@ -23,16 +23,18 @@ func (rf *Raft) makeRaftPersister() *RaftPersister {
 // save currentTerm、voteFor、LogEntry[] for a machine
 //
 type RaftStatePersister struct {
-	CurrentTerm Term
-	VoteFor     int
+	CurrentTerm       Term
+	VoteFor           int
+	LastSnapShotIndex Index
 }
 
-func (rf *RaftPersister) serializeState(stateMachine *RaftStateMachine) []byte {
+func (rp *RaftPersister) serializeState(stateMachine *RaftStateMachine) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	statePersist := RaftStatePersister{
-		CurrentTerm: stateMachine.raft.stateMachine.currentTerm,
-		VoteFor:     stateMachine.raft.stateMachine.voteFor,
+		CurrentTerm:       stateMachine.raft.stateMachine.currentTerm,
+		VoteFor:           stateMachine.raft.stateMachine.voteFor,
+		LastSnapShotIndex: stateMachine.lastSnapshotIndex,
 	}
 	if err := e.Encode(statePersist); err != nil {
 		panic(err)
@@ -40,18 +42,23 @@ func (rf *RaftPersister) serializeState(stateMachine *RaftStateMachine) []byte {
 	return w.Bytes()
 }
 
-func (rf *RaftPersister) deserializeState(b []byte, offset int, stateMachine *RaftStateMachine) {
+func (rp *RaftPersister) deserializeState(b []byte, offset int, stateMachine *RaftStateMachine) {
 	r := bytes.NewBuffer(b[offset:])
 	d := labgob.NewDecoder(r)
 	obj := RaftStatePersister{}
 	if err := d.Decode(&obj); err != nil {
 		panic(err)
 	}
+
+	// need to change commitIndex and lastApplied by comparing lastSnapShotIndex
+	stateMachine.commitIndex = max(stateMachine.commitIndex, obj.LastSnapShotIndex)
+	stateMachine.lastApplied = max(stateMachine.lastApplied, obj.LastSnapShotIndex)
+	stateMachine.lastSnapshotIndex = obj.LastSnapShotIndex
 	stateMachine.currentTerm = obj.CurrentTerm
 	stateMachine.voteFor = obj.VoteFor
 }
 
-func (rf *RaftPersister) serializeLog(stateMachine *RaftStateMachine) []byte {
+func (rp *RaftPersister) serializeLog(stateMachine *RaftStateMachine) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if err := e.Encode(stateMachine.log); err != nil {
@@ -60,7 +67,7 @@ func (rf *RaftPersister) serializeLog(stateMachine *RaftStateMachine) []byte {
 	return w.Bytes()
 }
 
-func (rf *RaftPersister) deserializeLog(b []byte, offset int, stateMachine *RaftStateMachine) {
+func (rp *RaftPersister) deserializeLog(b []byte, offset int, stateMachine *RaftStateMachine) {
 	r := bytes.NewBuffer(b[offset:])
 	d := labgob.NewDecoder(r)
 	logEntries := make([]Entry, 0)
@@ -70,11 +77,11 @@ func (rf *RaftPersister) deserializeLog(b []byte, offset int, stateMachine *Raft
 	stateMachine.log = logEntries
 }
 
-func (rf *RaftPersister) persist(stateMachine *RaftStateMachine) []byte {
+func (rp *RaftPersister) persist(stateMachine *RaftStateMachine) []byte {
 	// serializeLog
-	logBinary := rf.serializeLog(stateMachine)
+	logBinary := rp.serializeLog(stateMachine)
 	// serializeState
-	stateBinary := rf.serializeState(stateMachine)
+	stateBinary := rp.serializeState(stateMachine)
 	output := make([]byte, stateBinaryOffset+len(logBinary))
 	for i, b := range stateBinary {
 		output[i] = b

@@ -67,7 +67,6 @@ func (sm *RaftStateMachine) tryCommit() {
 	if newCommitIndex > sm.lastLogIndex() {
 		return
 	}
-	//sm.raft.print("leader tryCommit log, oldCommitIndex %d", oldCommitIndex)
 	for {
 		agree := 0
 		// compare each peerNode matchIndex with leader commitIndex
@@ -75,9 +74,8 @@ func (sm *RaftStateMachine) tryCommit() {
 			if idx == sm.raft.me {
 				continue
 			}
-			// ensure leader can only submit logEntry of currentTerm
-			// but for logEntries of previousTerm, leader can only copyEntries
-			if sm.matchIndex[idx] >= newCommitIndex && sm.getTermByIndex(int(newCommitIndex)) == sm.currentTerm {
+			// half of followers agree and leader can submit logEntries in its own term
+			if sm.matchIndex[idx] >= newCommitIndex && sm.getEntry(newCommitIndex).Term == sm.currentTerm {
 				agree++
 			}
 		}
@@ -92,7 +90,7 @@ func (sm *RaftStateMachine) tryCommit() {
 	}
 	// judge whether to apply logEntry into stateMachine
 	if sm.commitIndex > oldCommitIndex {
-		sm.raft.print("update leader commitIndex")
+		sm.raft.print("update leader commitIndex to %d", sm.commitIndex)
 		sm.tryApplyLog()
 	}
 }
