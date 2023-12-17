@@ -212,6 +212,8 @@ func (rf *Raft) sendSingleHL(server int, join *int, cond *sync.Cond) {
 		}
 		rf.initHLArgsLog(server, &args)
 		rf.stateMachine.rwmu.RUnlock()
+
+		// if initHLArgsLog successful, start send rpc
 		reply := AppendEntriesReply{}
 		rf.print("leader %d send AppendEntriesRPC to %d", rf.me, server)
 		ok := rf.sendAppendEntires(server, &args, &reply)
@@ -246,9 +248,9 @@ func (rf *Raft) initHLArgsLog(server int, args *AppendEntriesArgs) {
 	nextIndex := rf.stateMachine.nextIndex[server]
 	args.LeaderCommit = rf.stateMachine.commitIndex
 	args.PrevLogIndex = nextIndex - 1
-	rf.print("server %d prevLogIndex %d", server, args.PrevLogIndex)
+	rf.print("server %d prevLogIndex %d leaderCommitIndex %d leaderLastLogIndex %d", server, args.PrevLogIndex, args.LeaderCommit, rf.stateMachine.lastLogIndex())
 	args.PrevLogTerm = rf.stateMachine.getEntry(args.PrevLogIndex).Term
-	if rf.stateMachine.lastLogIndex() >= nextIndex {
+	if rf.stateMachine.lastLogIndex() >= nextIndex && rf.stateMachine.lastSnapshotIndex <= nextIndex {
 		args.Entries = rf.stateMachine.log[rf.stateMachine.getPhysicalIndex(nextIndex):]
 	} else {
 		args.Entries = nil

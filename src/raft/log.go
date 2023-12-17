@@ -14,6 +14,10 @@ func (sm *RaftStateMachine) getPhysicalIndex(index Index) int {
 }
 
 func (sm *RaftStateMachine) getEntry(index Index) Entry {
+	phyIdx := sm.getPhysicalIndex(index)
+	if phyIdx < 0 {
+		return sm.log[0]
+	}
 	return sm.log[sm.getPhysicalIndex(index)]
 }
 
